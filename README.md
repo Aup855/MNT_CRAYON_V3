@@ -25,7 +25,7 @@ Un crayon combustible réel n'est pas une pastille nue : elle est entourée d'un
 La chaleur générée par fission doit donc traverser **trois régions physiquement différentes** avant d'atteindre l'eau : conduction dans la pastille (avec source), un saut de température au contact du jeu (mauvais conducteur), puis conduction dans la gaine (sans source) avant la convection finale.
 
 <p align="center">
-  <img src="docs/img/schema_probleme_v3.png" width="850" alt="Coupe radiale du crayon combustible : pastille, jeu, gaine, avec convection en surface">
+  <img src="figures/schema_probleme_v3.png" width="850" alt="Coupe radiale du crayon combustible : pastille, jeu, gaine, avec convection en surface">
 </p>
 
 *Coupe radiale schématique : pastille UO₂ (source de fission, symétrie au centre), jeu hélium non maillé (conductance de contact `h_gap`), gaine Zircaloy (conduction pure, quasi isotherme), puis convection en surface externe (`h`, `T_fluide`).*
@@ -72,7 +72,7 @@ La v3 lève l'hypothèse « monomatériau » de v1/v2 et en garde volontairement
 Cas de validation, valeurs représentatives d'un crayon REP (`R_f = 4,1 mm`, `e_gap = 80 µm`, `e_clad = 0,57 mm`, `k_f = 3 W/(m·K)`, `k_c = 15 W/(m·K)`, `h_gap = 10⁴ W/(m²·K)`, `h_conv = 3,5×10⁴ W/(m²·K)`, `q''' = 3,8×10⁸ W/m³`, `T_fluide = 310 °C`). En régime permanent, la solution analytique exacte comporte quatre régimes raccordés (parabole dans la pastille, saut au jeu, logarithme dans la gaine, saut convectif en surface) :
 
 <p align="center">
-  <img src="docs/img/validation_v3.png" width="620" alt="Profil radial complet : parabole pastille, saut au jeu, logarithme gaine, saut convectif">
+  <img src="figures/validation_v3.png" width="620" alt="Profil radial complet : parabole pastille, saut au jeu, logarithme gaine, saut convectif">
 </p>
 
 | Grandeur | Numérique | Analytique | Écart |
