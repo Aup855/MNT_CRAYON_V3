@@ -1,0 +1,206 @@
+"""
+Solveur 1D de conduction thermique dans un crayon combustible complet :
+pastille (UO2) + jeu (helium) + gaine (Zircaloy), volumes finis +
+Crank-Nicolson.
+
+Extension multicouche de v1/v2 :
+    - Pastille (0 a R_f)        : source volumique dot_q, symetrie
+                                   automatique au centre (identique v1/v2)
+    - Jeu                       : non maille, modelise par une seule
+                                   conductance de contact h_gap entre le
+                                   dernier noeud pastille et le premier
+                                   noeud gaine (saut de temperature)
+    - Gaine (R_f+e_gap a R_clad) : sans source, convection en surface
+                                   externe (Robin, identique v2)
+
+Idee centrale : le maillage pastille et le maillage gaine sont concatenes
+en un seul tableau de noeuds, et le tableau de conductances aE contient
+cote a cote des conductances de conduction (k*A/dr) et une conductance de
+contact (h_gap*A_gap) a l'interface. La boucle d'assemblage des noeuds
+interieurs, deja ecrite pour v1/v2, s'applique sans modification au noeud
+d'interface pastille/gaine : il ne voit qu'une conductance a gauche et une
+a droite, sans savoir ce qu'elles representent physiquement.
+"""
+
+import numpy as np
+from scipy.linalg import solve_banded
+
+
+class CrayonV3:
+    """Solveur 1D cylindrique multicouche (volumes finis, vertex-centered) :
+    pastille (source, symetrie centrale) + jeu (conductance de contact) +
+    gaine (convection en surface externe, Robin)."""
+
+    def __init__(self, alpha_f, k_f, R_f, N_f,
+                 alpha_c, k_c, e_gap, e_clad, N_c,
+                 h_gap, h_conv, T_fluide, dt,
+                 T_init=None, source_f=None):
+        """
+        alpha_f, k_f, R_f, N_f    : diffusivite, conductivite, rayon,
+                                     nombre de noeuds -- pastille
+        alpha_c, k_c, e_clad, N_c : diffusivite, conductivite, epaisseur,
+                                     nombre de noeuds -- gaine
+        e_gap      : epaisseur du jeu [m], utilisee seulement pour situer
+                     geometriquement le premier noeud de gaine (le jeu
+                     lui-meme n'est pas maille)
+        h_gap      : conductance de contact du jeu [W/(m2.K)]
+        h_conv     : coefficient de convection eau/gaine [W/(m2.K)]
+        T_fluide   : temperature du fluide caloporteur [degC]
+        dt         : pas de temps [s]
+        source_f   : puissance volumique dans la pastille uniquement
+                     [W/m3]. None / scalaire / tableau (N_f,)
+        """
+        self.k_f, self.k_c = k_f, k_c
+        self.rho_cp_f = k_f / alpha_f
+        self.rho_cp_c = k_c / alpha_c
+        self.h_gap, self.h_conv = h_gap, h_conv
+        self.T_fluide = T_fluide
+        self.dt = dt
+
+        # Maillage pastille (0 .. R_f)
+        self.R_f, self.N_f = R_f, N_f
+        self.dr_f = R_f / (N_f - 1)
+        r_f = np.linspace(0.0, R_f, N_f)
+
+        # Maillage gaine : debute a R_f + e_gap, le jeu n'etant pas
+        # maille -- on saute directement son epaisseur pour positionner
+        # le premier noeud de gaine au bon endroit geometrique.
+        self.e_gap, self.e_clad, self.N_c = e_gap, e_clad, N_c
+        R_clad_in = R_f + e_gap
+        self.R_clad = R_clad_in + e_clad
+        self.dr_c = e_clad / (N_c - 1)
+        r_c = np.linspace(R_clad_in, self.R_clad, N_c)
+
+        self.r = np.concatenate([r_f, r_c])
+        self.N = N_f + N_c
+
+        # Volumes par region : disque plein au centre, couronnes a
+        # l'interieur, demi-coquilles aux deux bouts de chaque region
+        # (fuel_surface et clad_inner sont toutes les deux des
+        # demi-coquilles, puisque le jeu n'est pas maille entre elles).
+        V_f = np.empty(N_f)
+        V_f[0] = np.pi * (0.5 * self.dr_f) ** 2
+        V_f[1:-1] = 2.0 * np.pi * r_f[1:-1] * self.dr_f
+        r_face_last_f = r_f[-1] - 0.5 * self.dr_f
+        V_f[-1] = np.pi * (r_f[-1] ** 2 - r_face_last_f ** 2)
+
+        V_c = np.empty(N_c)
+        r_face_first_c = r_c[0] + 0.5 * self.dr_c
+        V_c[0] = np.pi * (r_face_first_c ** 2 - r_c[0] ** 2)
+        V_c[1:-1] = 2.0 * np.pi * r_c[1:-1] * self.dr_c
+        r_face_last_c = r_c[-1] - 0.5 * self.dr_c
+        V_c[-1] = np.pi * (r_c[-1] ** 2 - r_face_last_c ** 2)
+
+        self.V = np.concatenate([V_f, V_c])
+
+        self.rho_cp = np.concatenate([
+            np.full(N_f, self.rho_cp_f), np.full(N_c, self.rho_cp_c)
+        ])
+
+        # Conductances aE : aE[j] relie le noeud global j au noeud j+1.
+        #   j = 0 .. N_f-2     : conduction dans la pastille
+        #   j = N_f-1 (unique) : conductance de contact du jeu
+        #   j = N_f .. N-2     : conduction dans la gaine
+        Aface_f = 2.0 * np.pi * (np.arange(N_f - 1) + 0.5) * self.dr_f
+        aE_f = k_f * Aface_f / self.dr_f
+
+        R_gap_moy = R_f + e_gap / 2.0          # aire prise au rayon moyen du jeu
+        A_gap = 2.0 * np.pi * R_gap_moy
+        aE_gap = np.array([h_gap * A_gap])
+
+        Aface_c = 2.0 * np.pi * (r_c[:-1] + 0.5 * self.dr_c)
+        aE_c = k_c * Aface_c / self.dr_c
+
+        self.aE = np.concatenate([aE_f, aE_gap, aE_c])   # longueur N-1
+
+        if source_f is None:
+            source_f_arr = np.zeros(N_f)
+        elif np.isscalar(source_f):
+            source_f_arr = np.full(N_f, float(source_f))
+        else:
+            source_f_arr = np.array(source_f, dtype=float)
+            if source_f_arr.shape != (N_f,):
+                raise ValueError("source_f doit etre un scalaire ou un tableau (N_f,)")
+        self.source = np.concatenate([source_f_arr, np.zeros(N_c)])
+
+        self.T = np.full(self.N, T_fluide) if T_init is None else np.array(T_init, float)
+        self.t = 0.0
+        self.historique = [self.T.copy()]
+        self.temps = [0.0]
+
+        self.ab = self._construire_matrice()
+
+    def _construire_matrice(self):
+        """Identique, formule par formule, a v1/v2 pour les noeuds 0 a
+        N-1 -- y compris le noeud d'interface pastille/gaine, qui suit
+        exactement le meme schema generique que n'importe quel noeud
+        interieur. Seule la derniere ligne (Robin, surface externe de
+        la gaine) est specifique."""
+        N, dt = self.N, self.dt
+        V, aE, rho_cp = self.V, self.aE, self.rho_cp
+
+        ab = np.zeros((3, N))
+
+        # Noeuds interieurs 1..N-2, vectorises : formule unique, qu'il
+        # s'agisse d'un noeud "normal" ou du noeud d'interface pastille/
+        # gaine -- seule la valeur de aE differe a cet endroit.
+        aW_arr = aE[:-1]
+        aE_arr = aE[1:]
+
+        ab[1, 1:-1] = rho_cp[1:-1] * V[1:-1] / dt + 0.5 * (aE_arr + aW_arr)
+        ab[0, 2:] = -0.5 * aE_arr
+        ab[2, :-2] = -0.5 * aW_arr
+
+        # Noeud central : symetrie automatique, inchange
+        ab[1, 0] = rho_cp[0] * V[0] / dt + 0.5 * aE[0]
+        ab[0, 1] = -0.5 * aE[0]
+
+        # Noeud frontiere externe : Robin, inchange par rapport a v2
+        hA = self.h_conv * 2.0 * np.pi * self.R_clad
+        ab[1, -1] = rho_cp[-1] * V[-1] / dt + 0.5 * (aE[-1] + hA)
+        ab[2, -2] = -0.5 * aE[-1]
+
+        return ab
+
+    def step(self):
+        N, dt = self.N, self.dt
+        V, aE, rho_cp, T = self.V, self.aE, self.rho_cp, self.T
+        b = np.empty(N)
+
+        flux_expl = aE[1:] * (T[2:] - T[1:-1]) - aE[:-1] * (T[1:-1] - T[:-2])
+        b[1:-1] = (rho_cp[1:-1] * V[1:-1] / dt) * T[1:-1] + 0.5 * flux_expl \
+                   + self.source[1:-1] * V[1:-1]
+
+        flux_expl0 = aE[0] * (T[1] - T[0])
+        b[0] = (rho_cp[0] * V[0] / dt) * T[0] + 0.5 * flux_expl0 + self.source[0] * V[0]
+
+        hA = self.h_conv * 2.0 * np.pi * self.R_clad
+        flux_expl_last = aE[-1] * (T[-2] - T[-1]) - hA * T[-1]
+        b[-1] = (rho_cp[-1] * V[-1] / dt) * T[-1] + 0.5 * flux_expl_last \
+                 + hA * self.T_fluide + self.source[-1] * V[-1]
+
+        self.T = solve_banded((1, 1), self.ab, b)
+        self.t += dt
+        self.historique.append(self.T.copy())
+        self.temps.append(self.t)
+        return self.T
+
+    def solve(self, n_steps):
+        for _ in range(n_steps):
+            self.step()
+        return self.T
+
+    def get_historique(self):
+        return np.array(self.historique), np.array(self.temps)
+
+    def T_surface_pastille(self):
+        return self.T[self.N_f - 1]
+
+    def T_interne_gaine(self):
+        return self.T[self.N_f]
+
+    def T_surface_gaine(self):
+        return self.T[-1]
+
+    def flux_sortant_frontiere(self):
+        return self.h_conv * 2.0 * np.pi * self.R_clad * (self.T[-1] - self.T_fluide)
