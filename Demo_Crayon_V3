@@ -1,0 +1,60 @@
+"""
+Validation de CrayonV3 : pastille + jeu + gaine.
+Solution stationnaire exacte piecewise : parabole (pastille) + log
+(gaine), avec deux sauts de temperature (jeu, convection).
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from crayon_v3 import CrayonV3
+
+alpha_f, k_f, R_f, N_f = 6.9e-7, 3.0, 4.1e-3, 81
+alpha_c, k_c = 6.94e-6, 15.0             # Zircaloy, ordre de grandeur
+e_gap, e_clad, N_c = 8.0e-5, 5.7e-4, 21
+h_gap, h_conv = 1.0e4, 3.5e4
+T_fluide = 310.0
+dot_q = 3.8e8
+dt = 0.02
+
+crayon = CrayonV3(
+    alpha_f=alpha_f, k_f=k_f, R_f=R_f, N_f=N_f,
+    alpha_c=alpha_c, k_c=k_c, e_gap=e_gap, e_clad=e_clad, N_c=N_c,
+    h_gap=h_gap, h_conv=h_conv, T_fluide=T_fluide, dt=dt,
+    T_init=np.full(N_f + N_c, T_fluide), source_f=dot_q,
+)
+crayon.solve(20000)   # t = 400 s >> tau_pastille ~ 24 s
+
+R_clad = R_f + e_gap + e_clad
+R_gap_moy = R_f + e_gap / 2.0          # meme convention que dans le solveur
+B = -dot_q * R_f**2 / (2 * k_c)
+T_clad_out_exact = T_fluide + dot_q * R_f**2 / (2 * h_conv * R_clad)
+A = T_clad_out_exact - B * np.log(R_clad)
+T_clad_in_exact = A + B * np.log(R_f + e_gap)
+T_fuel_surf_exact = T_clad_in_exact + dot_q * R_f**2 / (2 * h_gap * R_gap_moy)
+T_centre_exact = T_fuel_surf_exact + dot_q / (4 * k_f) * R_f**2
+
+print(f"T centre          : num={crayon.T[0]:.2f}   exact={T_centre_exact:.2f}")
+print(f"T surface pastille : num={crayon.T_surface_pastille():.2f}   exact={T_fuel_surf_exact:.2f}")
+print(f"T interne gaine    : num={crayon.T_interne_gaine():.2f}   exact={T_clad_in_exact:.2f}")
+print(f"T surface gaine    : num={crayon.T_surface_gaine():.2f}   exact={T_clad_out_exact:.2f}")
+
+P_generee = dot_q * np.pi * R_f**2
+P_sortante = crayon.flux_sortant_frontiere()
+print(f"puissance generee  : {P_generee:.4f} W/m")
+print(f"puissance sortante : {P_sortante:.4f} W/m")
+print(f"ecart bilan relatif: {abs(P_generee - P_sortante) / P_generee:.3e}")
+
+plt.figure(figsize=(9, 5.5))
+plt.plot(crayon.r * 1e3, crayon.T, 'o', ms=3, color="crimson", label="numerique (VF)")
+plt.axvline(R_f * 1e3, ls=':', color='gray', lw=1)
+plt.axvline((R_f + e_gap) * 1e3, ls=':', color='gray', lw=1)
+plt.axhline(T_fluide, ls='--', color='steelblue', lw=1, label="T fluide")
+plt.xlabel("rayon [mm]")
+plt.ylabel("T [degC]")
+plt.title("Crayon combustible - pastille + jeu + gaine")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig("crayon_v3_validation.png", dpi=130)
+plt.show()
